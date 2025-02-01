@@ -21,13 +21,31 @@ num_cols = 23
 num_rows = 26
 
 # Define the height (in PDF units) of the note at the top that is not part of the grid.
-note_height = 20
+note_height = 15.5
 
 # Variable to adjust vertical assignment if needed (set to 0 to start)
 vertical_adjust = 0
 
 # Variable to adjust the splitting fraction (try increasing if necessary; e.g., 3.0)
 split_fraction_adjust = 3.0
+
+############################################
+# Fallback and Text-Related Settings for Divider Acceptance
+############################################
+
+# Acceptable relative range for the divider line within a cell.
+# For row 0 (top row): lower_bound_top, for other rows: lower_bound_other.
+lower_bound_top = 0.0     # for top row, allow divider very near the top
+lower_bound_other = 0.1   # for other rows, do not accept dividers too near the top
+upper_bound = 0.8        # common upper bound for all rows
+
+# Fallback tolerance: if the candidate's relative value is outside the standard range
+# but within fallback_tolerance of the midpoint of the acceptable range, then accept it.
+fallback_tolerance = 0.1  # adjust this value if needed
+
+# Text margin (in PDF units). If a candidate divider line's center is within this distance
+# below the highest text row in the square, then we accept it regardless of the relative criteria.
+text_margin = 3  # adjust as needed
 
 ############################################
 # Data Structures for Text Extraction
@@ -110,6 +128,17 @@ for page_number, page_layout in enumerate(extract_pages(pdf_path)):
     break  # Only process the first page
 
 ############################################
+# Compute the Top of the Text for Each Square
+############################################
+
+# Create a dictionary to hold the maximum text top (ey1) value for each square.
+text_top_for_square = {}
+for square, texts in squares_data.items():
+    # Each text tuple is (raw_text, baseline, ey1)
+    # We'll use the maximum ey1 value as the text's top.
+    text_top_for_square[square] = max(ey1 for (_, _, ey1) in texts)
+
+############################################
 # Post-Process: Split Overfull Text Lines Based on Vertical Boundaries
 ############################################
 
@@ -182,17 +211,18 @@ for i in range(1, total_squares + 1):
 # Detect Horizontal Lines That Appear to Split a Square (Internal Only)
 ############################################
 
-# We'll detect LTLine objects that are nearly horizontal (vertical span <2 PDF units, horizontal length >10 PDF units).
+# We'll detect LTLine objects that are nearly horizontal (vertical span <3 PDF units, horizontal length >10 PDF units).
 # Then, we only consider a line if its center is sufficiently internal to the square.
 horizontal_lines_split = {}  # horizontal_lines_split[square_index] = list of (x0, y0, x1, y1)
 
-# Tolerance for being "internal": here we use 10% of cell_height_pdf (at least 2 units).
-tolerance = max(2, 0.1 * cell_height_pdf)
+# Tolerance for being "internal": use 5% of cell_height_pdf (at least 1 unit).
+tolerance = max(1, 0.05 * cell_height_pdf)
 
 for page_number, page_layout in enumerate(extract_pages(pdf_path)):
     for obj in page_layout:
         if isinstance(obj, LTLine):
-            if abs(obj.y1 - obj.y0) < 2 and (obj.x1 - obj.x0) > 10:
+            # Allow a slightly thicker line (up to 3 PDF units) to be considered horizontal.
+            if abs(obj.y1 - obj.y0) < 3 and (obj.x1 - obj.x0) > 10:
                 center_x_line = (obj.x0 + obj.x1) / 2
                 center_y_line = (obj.y0 + obj.y1) / 2
                 col = int(center_x_line / cell_width_pdf)
@@ -208,7 +238,10 @@ for page_number, page_layout in enumerate(extract_pages(pdf_path)):
                     horizontal_lines_split[square_index].append((obj.x0, obj.y0, obj.x1, obj.y1))
     break  # Only process the first page
 
-# For squares with multiple horizontal lines, choose the one whose center is closest to the square's vertical center.
+############################################
+# Choose the Best Horizontal Line for Each Square
+############################################
+
 horizontal_lines_final = {}
 for square in horizontal_lines_split:
     lines = horizontal_lines_split[square]
@@ -217,11 +250,32 @@ for square in horizontal_lines_split:
     bottom_of_square_pdf = effective_grid_height - (row + 1) * cell_height_pdf
     square_center_pdf = (top_of_square_pdf + bottom_of_square_pdf) / 2
     best_line = min(lines, key=lambda l: abs(((l[1] + l[3]) / 2) - square_center_pdf))
-    # Now, only accept the line if its relative position is between 0.3 and 0.7 within the cell.
     line_center_pdf = (best_line[1] + best_line[3]) / 2
     relative = (top_of_square_pdf - line_center_pdf) / cell_height_pdf  # 0 = top, 1 = bottom
-    if 0.3 <= relative <= 0.7:
+
+    # Standard acceptable range:
+    lower_bound = lower_bound_top if row == 0 else lower_bound_other
+
+    # New check: if we have text in this square, get its top.
+    if square in text_top_for_square:
+        text_top = text_top_for_square[square]
+        # If the candidate divider line is very close to the text top (i.e. directly after the text row),
+        # accept it regardless of the computed relative value.
+        if (line_center_pdf - text_top) < text_margin:
+            print(f"Square {square}: accepting divider because it is close to the text (margin < {text_margin}).")
+            horizontal_lines_final[square] = best_line
+            continue
+
+    # Standard acceptance check, with fallback.
+    if lower_bound <= relative <= upper_bound:
         horizontal_lines_final[square] = best_line
+    else:
+        midpoint = (lower_bound + upper_bound) / 2
+        if abs(relative - midpoint) <= fallback_tolerance:
+            print(f"Square {square}: fallback acceptance with relative = {relative:.2f}")
+            horizontal_lines_final[square] = best_line
+        else:
+            print(f"Square {square} rejected: row {row} relative {relative:.2f} not in [{lower_bound}, {upper_bound}]")
 
 ############################################
 # Compute Divider Position in HTML Cells
@@ -247,8 +301,11 @@ for square, line in horizontal_lines_final.items():
     bottom_of_square_pdf = effective_grid_height - (row + 1) * cell_height_pdf
     line_center_pdf = (line[1] + line[3]) / 2
     relative = (top_of_square_pdf - line_center_pdf) / cell_height_pdf  # 0 at top, 1 at bottom
-    # Only mark if relative is between 0.3 and 0.7 (should be, by our earlier filter).
-    if 0.3 <= relative <= 0.7:
+
+    lower_bound = lower_bound_top if row == 0 else lower_bound_other
+
+    # Use the same criteria with fallback acceptance.
+    if lower_bound <= relative <= upper_bound or abs(relative - ((lower_bound+upper_bound)/2)) <= fallback_tolerance:
         y_in_cell = relative * cell_height_px
         horizontal_marker[square] = y_in_cell
 
