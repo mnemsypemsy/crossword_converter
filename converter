@@ -1,0 +1,380 @@
+import os
+import html  # for escaping text in HTML/SVG
+from pdfminer.high_level import extract_pages
+from pdfminer.layout import LTTextLine, LTTextContainer, LTLine
+
+############################################
+# Configuration and Paths
+############################################
+
+# Input PDF path (adjust if necessary)
+pdf_path = "/Users/daniel/Desktop/svg to pdf/SA011 EOS.pdf"
+pdf_directory = os.path.dirname(pdf_path)
+
+# Output folders/files
+svg_output_folder = os.path.join(pdf_directory, "output_svg")
+os.makedirs(svg_output_folder, exist_ok=True)
+html_output_path = os.path.join(pdf_directory, "crossword_grid.html")
+
+# Grid dimensions (example: crossword grid 23 columns x 26 rows)
+num_cols = 23
+num_rows = 26
+
+# Define the height (in PDF units) of the note at the top that is not part of the grid.
+note_height = 20
+
+# Variable to adjust vertical assignment if needed (set to 0 to start)
+vertical_adjust = 0
+
+# Variable to adjust the splitting fraction (try increasing if necessary; e.g., 3.0)
+split_fraction_adjust = 3.0
+
+############################################
+# Data Structures for Text Extraction
+############################################
+
+# We'll store each text line individually in squares_data.
+# For each square (1-indexed), store a list of items: (text, baseline, top)
+squares_data = {}  # e.g., squares_data[square_index] = [(text1, baseline1, top1), ...]
+
+############################################
+# Process the First Page: Extract Text Lines & Generate Debug SVG
+############################################
+
+# Also store PDF measurements for later mapping.
+pdf_page_width = None
+pdf_page_height = None
+effective_grid_height = None
+cell_width_pdf = None
+cell_height_pdf = None
+
+for page_number, page_layout in enumerate(extract_pages(pdf_path)):
+    # Get page dimensions (PDF coordinates; origin at bottom-left)
+    x0, y0, x1, y1 = page_layout.bbox
+    pdf_page_width = x1 - x0
+    pdf_page_height = y1 - y0
+
+    # Define effective grid area (exclude the note at the top)
+    effective_grid_height = pdf_page_height - note_height
+
+    # Compute grid cell dimensions from the PDF
+    cell_width_pdf = pdf_page_width / num_cols
+    cell_height_pdf = effective_grid_height / num_rows
+
+    print(f"PDF page dimensions: {pdf_page_width} x {pdf_page_height}")
+    print(f"Note height: {note_height}, Effective grid height: {effective_grid_height}")
+    print(f"PDF cell dimensions: {cell_width_pdf:.2f} x {cell_height_pdf:.2f}")
+    print(f"Using vertical_adjust = {vertical_adjust}, split_fraction_adjust = {split_fraction_adjust}")
+
+    # Prepare an SVG file for debugging/visual inspection
+    svg_file_path = os.path.join(svg_output_folder, f"page_{page_number+1}.svg")
+    with open(svg_file_path, "w", encoding="utf-8") as svg_file:
+        svg_file.write(f'<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="{pdf_page_width}" height="{pdf_page_height}" viewBox="0 0 {pdf_page_width} {pdf_page_height}">\n')
+        svg_file.write(f'<rect x="0" y="0" width="{pdf_page_width}" height="{pdf_page_height}" fill="white" />\n')
+        
+        # Iterate over LTTextContainer elements and then over LTTextLine children.
+        for element in page_layout:
+            if isinstance(element, LTTextContainer):
+                for obj in element:
+                    if isinstance(obj, LTTextLine):
+                        raw_text = obj.get_text().strip()
+                        if raw_text:
+                            ex0, ey0, ex1, ey1 = obj.bbox
+                            center_x = (ex0 + ex1) / 2
+                            # Use baseline (ey0) for vertical assignment.
+                            baseline = ey0
+                            adjusted_baseline = baseline - vertical_adjust
+                            # Skip text lines in the note region.
+                            if baseline > effective_grid_height:
+                                continue
+                            col = int(center_x / cell_width_pdf)
+                            row = num_rows - 1 - int(adjusted_baseline / cell_height_pdf)
+                            square_index = row * num_cols + col + 1
+
+                            if square_index not in squares_data:
+                                squares_data[square_index] = []
+                            squares_data[square_index].append((raw_text, baseline, ey1))
+
+                            # Draw bounding box and text in SVG for debugging.
+                            svg_ex0 = ex0
+                            svg_ey0 = pdf_page_height - ey1  # convert top of element to SVG coordinate
+                            rect_width = ex1 - ex0
+                            rect_height = ey1 - ey0
+                            svg_file.write(f'<rect x="{ex0}" y="{svg_ey0}" width="{rect_width}" height="{rect_height}" fill="none" stroke="red" stroke-width="0.5" />\n')
+                            svg_text_x = ex0
+                            svg_text_y = pdf_page_height - ey0  # convert bottom to SVG coordinate
+                            svg_file.write(f'<text x="{svg_text_x}" y="{svg_text_y}" font-family="Helvetica" font-size="10" fill="black">{html.escape(raw_text)}</text>\n')
+        
+        svg_file.write("</svg>\n")
+    print(f"SVG file created: {svg_file_path}")
+    break  # Only process the first page
+
+############################################
+# Post-Process: Split Overfull Text Lines Based on Vertical Boundaries
+############################################
+
+total_squares = num_cols * num_rows
+
+for i in sorted(squares_data.keys()):
+    row = (i - 1) // num_cols  # 0 = top row
+    if row == num_rows - 1:
+        continue  # Skip bottom row
+    expected_bottom = effective_grid_height - (row + 1) * cell_height_pdf
+    new_elements = []
+    move_elements = []
+    for (txt, base, top) in squares_data.get(i, []):
+        # If the text line's baseline is below the expected bottom boundary, mark it for moving.
+        if base < expected_bottom:
+            move_elements.append((txt, base, top))
+        else:
+            new_elements.append((txt, base, top))
+    if move_elements:
+        for (txt, base, top) in move_elements:
+            box_height = top - base
+            if box_height <= 0:
+                continue
+            overlap = expected_bottom - base
+            if overlap < 0:
+                overlap = 0
+            fraction = overlap / box_height
+            adjusted_fraction = fraction * split_fraction_adjust
+            if adjusted_fraction < 0:
+                adjusted_fraction = 0
+            if adjusted_fraction > 1:
+                adjusted_fraction = 1
+            split_index = int(adjusted_fraction * len(txt))
+            if split_index < 1:
+                split_index = 1
+            if split_index >= len(txt):
+                split_index = len(txt) - 1
+
+            print(f"Square {i}: splitting text '{txt}'")
+            print(f"  Box height = {box_height:.2f}, Overlap = {overlap:.2f}, Raw fraction = {fraction:.2f}")
+            print(f"  Adjusted fraction (x{split_fraction_adjust}) = {adjusted_fraction:.2f}")
+            print(f"  Split index = {split_index} (text length = {len(txt)})")
+
+            part_current = txt[:split_index].strip()
+            part_below = txt[split_index:].strip()
+            if part_current:
+                new_elements.append((part_current, base, base + (top - base) * (split_index / len(txt))))
+            below_square = i + num_cols
+            if part_below:
+                if below_square in squares_data:
+                    squares_data[below_square].append((part_below, base, top))
+                else:
+                    squares_data[below_square] = [(part_below, base, top)]
+        squares_data[i] = new_elements
+
+############################################
+# Re-Aggregate the Text for Each Square into a Single String
+############################################
+
+squares_final = {}
+for i in range(1, total_squares + 1):
+    if i in squares_data and squares_data[i]:
+        sorted_elems = sorted(squares_data[i], key=lambda x: x[1], reverse=True)
+        combined = " ".join([txt for (txt, base, top) in sorted_elems])
+        squares_final[i] = combined
+    else:
+        squares_final[i] = ""
+
+############################################
+# Detect Horizontal Lines That Appear to Split a Square (Internal Only)
+############################################
+
+# We'll detect LTLine objects that are nearly horizontal (vertical span <2 PDF units, horizontal length >10 PDF units).
+# Then, we only consider a line if its center is sufficiently internal to the square.
+horizontal_lines_split = {}  # horizontal_lines_split[square_index] = list of (x0, y0, x1, y1)
+
+# Tolerance for being "internal": here we use 10% of cell_height_pdf (at least 2 units).
+tolerance = max(2, 0.1 * cell_height_pdf)
+
+for page_number, page_layout in enumerate(extract_pages(pdf_path)):
+    for obj in page_layout:
+        if isinstance(obj, LTLine):
+            if abs(obj.y1 - obj.y0) < 2 and (obj.x1 - obj.x0) > 10:
+                center_x_line = (obj.x0 + obj.x1) / 2
+                center_y_line = (obj.y0 + obj.y1) / 2
+                col = int(center_x_line / cell_width_pdf)
+                row = num_rows - 1 - int(center_y_line / cell_height_pdf)
+                square_index = row * num_cols + col + 1
+                # Compute vertical boundaries of the square (in PDF coordinates)
+                top_of_square_pdf = effective_grid_height - row * cell_height_pdf
+                bottom_of_square_pdf = effective_grid_height - (row + 1) * cell_height_pdf
+                # Check if the line's center is not too close to the square's top or bottom.
+                if (center_y_line < (top_of_square_pdf - tolerance)) and (center_y_line > (bottom_of_square_pdf + tolerance)):
+                    if square_index not in horizontal_lines_split:
+                        horizontal_lines_split[square_index] = []
+                    horizontal_lines_split[square_index].append((obj.x0, obj.y0, obj.x1, obj.y1))
+    break  # Only process the first page
+
+# For squares with multiple horizontal lines, choose the one whose center is closest to the square's vertical center.
+horizontal_lines_final = {}
+for square in horizontal_lines_split:
+    lines = horizontal_lines_split[square]
+    row = (square - 1) // num_cols
+    top_of_square_pdf = effective_grid_height - row * cell_height_pdf
+    bottom_of_square_pdf = effective_grid_height - (row + 1) * cell_height_pdf
+    square_center_pdf = (top_of_square_pdf + bottom_of_square_pdf) / 2
+    best_line = min(lines, key=lambda l: abs(((l[1] + l[3]) / 2) - square_center_pdf))
+    # Now, only accept the line if its relative position is between 0.3 and 0.7 within the cell.
+    line_center_pdf = (best_line[1] + best_line[3]) / 2
+    relative = (top_of_square_pdf - line_center_pdf) / cell_height_pdf  # 0 = top, 1 = bottom
+    if 0.3 <= relative <= 0.7:
+        horizontal_lines_final[square] = best_line
+
+############################################
+# Compute Divider Position in HTML Cells
+############################################
+
+# Map PDF vertical position to HTML cell coordinate.
+# For a square in row r:
+#   PDF cell vertical range: [bottom_of_square_pdf, top_of_square_pdf]
+#   Let line_center_pdf be the vertical center of the line.
+#   Relative position = (top_of_square_pdf - line_center_pdf) / cell_height_pdf.
+#   Then HTML y-position in cell = relative * cell_height_px.
+horizontal_marker = {}
+# HTML grid container dimensions:
+container_width = 1109  # pixels
+container_height = 1265  # pixels
+padding_top = 20  # pixels
+cell_width_px = container_width / num_cols
+cell_height_px = (container_height - padding_top) / num_rows
+
+for square, line in horizontal_lines_final.items():
+    row = (square - 1) // num_cols
+    top_of_square_pdf = effective_grid_height - row * cell_height_pdf
+    bottom_of_square_pdf = effective_grid_height - (row + 1) * cell_height_pdf
+    line_center_pdf = (line[1] + line[3]) / 2
+    relative = (top_of_square_pdf - line_center_pdf) / cell_height_pdf  # 0 at top, 1 at bottom
+    # Only mark if relative is between 0.3 and 0.7 (should be, by our earlier filter).
+    if 0.3 <= relative <= 0.7:
+        y_in_cell = relative * cell_height_px
+        horizontal_marker[square] = y_in_cell
+
+############################################
+# Generate HTML Output: Crossword Grid, Table of Square Values, and Table of Dividers
+############################################
+
+html_output = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Crossword Puzzle</title>
+<style>
+  body {{
+    font-family: Arial, sans-serif;
+    background: white;
+    padding: 20px;
+    text-align: center;
+  }}
+  .grid-container {{
+    padding-top: {padding_top}px;
+    width: {container_width}px;
+    height: {container_height}px;
+    display: grid;
+    grid-template-columns: repeat({num_cols}, {cell_width_px:.2f}px);
+    grid-template-rows: repeat({num_rows}, {cell_height_px:.2f}px);
+    gap: 0;
+    margin: auto;
+    border: 1px solid #aaa;
+  }}
+  .grid-cell {{
+    width: {cell_width_px:.2f}px;
+    height: {cell_height_px:.2f}px;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 7px;
+    text-align: center;
+    box-sizing: border-box;
+    border: 0.5px solid #aaa;
+  }}
+  .grid-cell.empty {{
+    background-color: #fff;
+  }}
+  .cell-divider {{
+    position: absolute;
+    left: 0;
+    right: 0;
+    border-top: 1px solid red;
+  }}
+  table {{
+    margin: 20px auto;
+    border-collapse: collapse;
+    width: 80%;
+    font-size: 12px;
+  }}
+  table, th, td {{
+    border: 1px solid #444;
+  }}
+  th, td {{
+    padding: 5px;
+    text-align: center;
+  }}
+</style>
+</head>
+<body>
+<h1>Crossword Puzzle</h1>
+<div class="grid-container">
+"""
+
+# Build grid cells in row-major order.
+for i in range(1, total_squares + 1):
+    cell_text = squares_final.get(i, "").strip()
+    cell_class = "grid-cell" + ("" if cell_text else " empty")
+    cell_html = f'<div class="{cell_class}">'
+    cell_html += html.escape(cell_text)
+    # If this square has a detected internal divider, add a divider element.
+    if i in horizontal_marker:
+        divider_y = horizontal_marker[i]
+        cell_html += f'<div class="cell-divider" style="top: {divider_y:.2f}px;"></div>'
+    cell_html += '</div>\n'
+    html_output += cell_html
+
+html_output += "</div>\n"
+
+# Create a table listing square numbers and their text values.
+html_output += """
+<h2>Square Values</h2>
+<table>
+  <tr>
+    <th>Square #</th>
+    <th>Text</th>
+  </tr>
+"""
+for i in range(1, total_squares + 1):
+    cell_text = squares_final.get(i, "").strip()
+    html_output += f"<tr><td>{i}</td><td>{html.escape(cell_text)}</td></tr>\n"
+html_output += """
+</table>
+"""
+
+# Create a table listing squares with detected dividers.
+html_output += """
+<h2>Squares with Detected Horizontal Dividers</h2>
+<table>
+  <tr>
+    <th>Square #</th>
+    <th>Line Coordinates (PDF)</th>
+    <th>Divider Position in Cell (px)</th>
+  </tr>
+"""
+for square in sorted(horizontal_lines_final.keys()):
+    (x0_line, y0_line, x1_line, y1_line) = horizontal_lines_final[square]
+    line_str = f"({x0_line:.1f}, {y0_line:.1f}, {x1_line:.1f}, {y1_line:.1f})"
+    divider_pos = horizontal_marker.get(square, None)
+    divider_str = f"{divider_pos:.2f}" if divider_pos is not None else ""
+    html_output += f"<tr><td>{square}</td><td>{line_str}</td><td>{divider_str}</td></tr>\n"
+html_output += """
+</table>
+</body>
+</html>
+"""
+
+# Write the final HTML file.
+with open(html_output_path, "w", encoding="utf-8") as html_file:
+    html_file.write(html_output)
+
+print(f"HTML grid file created at: {html_output_path}")
