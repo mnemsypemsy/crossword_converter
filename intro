@@ -1,0 +1,279 @@
+Documentation and Explanation
+Extraction of Line Segments:
+
+The code uses PyMuPDF to extract drawing commands from the first page of the PDF and filters those commands to obtain line segments (commands of type "l").
+These segments are stored in the list line_segments.
+Mapping Endpoints:
+
+A dictionary point_to_segments is built to map each endpoint (a tuple representing a point) to all segments that contain that point. This enables efficient lookup of segments sharing a common endpoint.
+Arrow Detection (L-Shapes):
+
+The algorithm examines each pair of segments that share a common point 
+𝐶
+C.
+Let the other endpoints be 
+𝑃
+1
+P 
+1
+​
+  and 
+𝑃
+2
+P 
+2
+​
+ ; then the vectors are computed as:
+𝑣
+⃗
+1
+=
+𝑃
+1
+−
+𝐶
+,
+𝑣
+⃗
+2
+=
+𝑃
+2
+−
+𝐶
+.
+v
+  
+1
+​
+ =P 
+1
+​
+ −C, 
+v
+  
+2
+​
+ =P 
+2
+​
+ −C.
+The angle 
+𝜃
+θ between these vectors is calculated using:
+𝜃
+=
+arccos
+⁡
+ ⁣
+(
+𝑣
+⃗
+1
+⋅
+𝑣
+⃗
+2
+∥
+𝑣
+⃗
+1
+∥
+∥
+𝑣
+⃗
+2
+∥
+)
+θ=arccos( 
+∥ 
+v
+  
+1
+​
+ ∥∥ 
+v
+  
+2
+​
+ ∥
+v
+  
+1
+​
+ ⋅ 
+v
+  
+2
+​
+ 
+​
+ )
+Detection Condition: If
+∣
+𝜃
+−
+90
+∘
+∣
+≤
+ANGLE_TOLERANCE
+,
+∣θ−90 
+∘
+ ∣≤ANGLE_TOLERANCE,
+then the segments are approximately perpendicular and form an L-shape—this is considered a potential arrow.
+The lengths of the legs are compared. If one leg is at least LONG_ARROW_RATIO times longer than the other, the arrow tip is chosen to be on the shorter leg; otherwise, the tip is chosen as the endpoint farther from 
+𝐶
+C.
+The arrow’s direction is determined from the angle from 
+𝐶
+C to the tip:
+−
+45
+∘
+≤
+−45 
+∘
+ ≤ angle 
+<
+45
+∘
+<45 
+∘
+  → "right"
+45
+∘
+≤
+45 
+∘
+ ≤ angle 
+<
+135
+∘
+<135 
+∘
+  → "up"
+Angle 
+≥
+135
+∘
+≥135 
+∘
+  or 
+<
+−
+135
+∘
+<−135 
+∘
+  → "left"
+Otherwise → "down"
+Transformation for "Right" Arrows:
+
+Only arrows with direction "right" are transformed. The transformation consists of:
+Horizontal Flip: For a point 
+𝑝
+=
+(
+𝑥
+,
+𝑦
+)
+p=(x,y) and center 
+𝑐
+=
+(
+𝑐
+𝑥
+,
+𝑐
+𝑦
+)
+c=(c 
+x
+​
+ ,c 
+y
+​
+ ), compute:
+𝑝
+′
+=
+(
+2
+𝑐
+𝑥
+−
+𝑥
+,
+ 
+𝑦
+)
+p 
+′
+ =(2c 
+x
+​
+ −x,y)
+90° Counterclockwise Rotation: Compute the vector from the center:
+(
+𝑑
+𝑥
+,
+𝑑
+𝑦
+)
+=
+𝑝
+′
+−
+𝑐
+,
+(dx,dy)=p 
+′
+ −c,
+then rotate it:
+(
+𝑑
+𝑥
+,
+𝑑
+𝑦
+)
+→
+(
+−
+𝑑
+𝑦
+,
+ 
+𝑑
+𝑥
+)
+,
+(dx,dy)→(−dy,dx),
+and add the center back:
+𝑝
+′
+′
+=
+𝑐
++
+(
+−
+𝑑
+𝑦
+,
+ 
+𝑑
+𝑥
+)
+p 
+′′
+ =c+(−dy,dx)
+This transformation is implemented in transform_point_for_right() and applied to both endpoints of each segment for arrows with direction "right".
+Drawing and JSON Output:
+
+The arrow segments (drawn as two lines) are rendered in black into an SVG file. No text labels are added to the SVG because the arrow information is output in the JSON file.
+The JSON file contains an array of arrow objects with properties: direction, common, tip, tail, and center.
